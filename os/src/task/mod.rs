@@ -120,3 +120,23 @@ lazy_static! {
 pub fn add_initproc() {
     add_task(INITPROC.clone());
 }
+
+/// Get status of current task
+pub fn get_current_task_status() -> TaskStatus {
+    TASK_MANAGER.get_current_task_status()
+}
+
+/// Get syscall times of current task
+pub fn get_current_task_syscall_times() -> [u32; MAX_SYSCALL_NUM] {
+    TASK_MANAGER.get_current_task_syscall_times()
+}
+
+/// Get exec time of current task
+pub fn get_current_task_exec_time() -> usize{
+    TASK_MANAGER.get_current_task_exec_time()
+}
+
+/// Add current time to total syscall times
+pub fn add_syscall_time(syscall_id: usize) {
+    TASK_MANAGER.add_syscall_time(syscall_id);
+}

@@ -71,6 +71,12 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// The time when task starts
+    pub exec_time: usize,
+    
+    /// The numbers of syscall called by task
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
 }
 
 impl TaskControlBlockInner {
@@ -135,6 +141,8 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    exec_time: 0,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
                 })
             },
         };
@@ -216,6 +224,8 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    exec_time: parent_inner.exec_time,
+                    syscall_times: parent_inner.syscall_times,
                 })
             },
         });

@@ -14,10 +14,12 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
+use crate::timer::get_time_ms;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -79,6 +81,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
+        next_task.exec_time = get_time_ms();
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -139,6 +142,9 @@ impl TaskManager {
         if let Some(next) = self.find_next_task() {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
+            if inner.tasks[next].task_status == TaskStatus::UnInit {
+                inner.tasks[next].exec_time = get_time_ms();
+            }
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
@@ -152,6 +158,39 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    /// Add current time to total syscall times
+    fn add_syscall_time(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[syscall_id] += 1;
+
+        drop(inner);
+    }
+
+    /// Get syscall times of current task
+    fn get_current_task_syscall_times(&self) -> [u32; MAX_SYSCALL_NUM] {
+        let inner = TASK_MANAGER.inner.exclusive_access();
+        let result = inner.tasks[inner.current_task].syscall_times;
+        drop(inner);
+        result
+    }
+
+    /// Get status of current task
+    fn get_current_task_status(&self) -> TaskStatus {
+        let inner = TASK_MANAGER.inner.exclusive_access();
+        let result = inner.tasks[inner.current_task].task_status;
+        drop(inner);
+        result
+    }
+
+    /// Get exec time of current task
+    fn get_current_task_exec_time(&self) -> usize{
+        let inner = TASK_MANAGER.inner.exclusive_access();
+        let result = inner.tasks[inner.current_task].exec_time;
+        drop(inner);
+        result
     }
 }
 
@@ -201,4 +240,24 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Get status of current task
+pub fn get_current_task_status() -> TaskStatus {
+    TASK_MANAGER.get_current_task_status()
+}
+
+/// Get syscall times of current task
+pub fn get_current_task_syscall_times() -> [u32; MAX_SYSCALL_NUM] {
+    TASK_MANAGER.get_current_task_syscall_times()
+}
+
+/// Get exec time of current task
+pub fn get_current_task_exec_time() -> usize{
+    TASK_MANAGER.get_current_task_exec_time()
+}
+
+/// Add current time to total syscall times
+pub fn add_syscall_time(syscall_id: usize) {
+    TASK_MANAGER.add_syscall_time(syscall_id);
 }

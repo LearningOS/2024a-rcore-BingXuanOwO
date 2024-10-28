@@ -16,6 +16,7 @@ mod task;
 
 use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::MemorySet;
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -192,6 +193,13 @@ impl TaskManager {
         drop(inner);
         result
     }
+
+    fn current_user_memory_set(&self) -> *mut MemorySet {
+        let _inner = self.inner.exclusive_access();
+        let current_task = _inner.current_task;
+        drop(_inner);
+        &mut self.inner.exclusive_access().tasks[current_task].memory_set as *mut MemorySet
+    }
 }
 
 /// Run the first task in task list.
@@ -260,4 +268,9 @@ pub fn get_current_task_exec_time() -> usize{
 /// Add current time to total syscall times
 pub fn add_syscall_time(syscall_id: usize) {
     TASK_MANAGER.add_syscall_time(syscall_id);
+}
+
+/// Get a row pointer of current user's memory set 
+pub fn current_user_memory_set() -> *mut MemorySet {
+    TASK_MANAGER.current_user_memory_set()
 }

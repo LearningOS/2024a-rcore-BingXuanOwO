@@ -140,3 +140,8 @@ pub fn get_current_task_exec_time() -> usize{
 pub fn add_syscall_time(syscall_id: usize) {
     TASK_MANAGER.add_syscall_time(syscall_id);
 }
+
+/// Get a row pointer of current user's memory set 
+pub fn current_user_memory_set() -> *mut MemorySet {
+    TASK_MANAGER.current_user_memory_set()
+}

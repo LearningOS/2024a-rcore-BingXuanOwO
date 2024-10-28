@@ -5,7 +5,10 @@ use alloc::sync::Arc;
 use crate::{
     config::MAX_SYSCALL_NUM,
     fs::{open_file, OpenFlags},
-    mm::{translated_refmut, translated_str},
+    mm::{
+        translated_refmut, translated_str, map_area_from_token, 
+        map_user_ptr_to_kernel, unmap_area_from_token, MapPermission, VirtAddr 
+    },
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next, TaskStatus,
@@ -120,11 +123,22 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    trace!("kernel: sys_get_time");
+
+    let time_us = get_time_us();
+    let result = map_user_ptr_to_kernel(_ts);
+
+    if result.is_err() {
+        return -1;
+    }
+
+    let virt_ts = result.unwrap();
+
+    unsafe{
+        (*virt_ts).sec = time_us / 1_000_000;
+        (*virt_ts).usec = time_us % 1_000_000;
+    }
+    0
 }
 
 /// YOUR JOB: Finish sys_task_info to pass testcases
@@ -135,30 +149,73 @@ pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
     let status = get_current_task_status();
     let syscall_times = get_current_task_syscall_times();
     let time = get_time_ms() - get_current_task_exec_time();
+
+    let result = map_user_ptr_to_kernel(_ti);
+
+    if result.is_err() {
+        return -1;
+    }
+
+    let virt_ti = result.unwrap();
+
     unsafe{
-        (*_ti).status = status;
-        (*_ti).syscall_times = syscall_times;
-        (*_ti).time = time;
+        (*virt_ti).status = status;
+        (*virt_ti).syscall_times = syscall_times;
+        (*virt_ti).time = time;
     }
     0
 }
 
 /// YOUR JOB: Implement mmap.
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    trace!("kernel: sys_mmap");
+
+    if _port > 7 || _port == 0 {
+        return -1
+    }
+
+    if VirtAddr(_start).page_offset() != 0 {
+        return -1
+    }
+
+    let mut permission: MapPermission = MapPermission::U;
+
+    if _port & 1 != 0 {
+        permission |= MapPermission::R
+    }
+
+    if _port & 2 != 0 {
+        permission |= MapPermission::W
+    }
+
+    if _port & 4 != 0 {
+        permission |= MapPermission::X
+
+    }
+
+    let result = map_area_from_token(_start, _len, permission);
+    if result.is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 /// YOUR JOB: Implement munmap.
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    trace!("kernel: sys_munmap");
+
+    if VirtAddr(_start).page_offset() != 0 {
+        return -1
+    }
+    
+    let result = unmap_area_from_token(_start, _len);
+
+    if result.is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 /// change data segment size

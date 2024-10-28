@@ -8,6 +8,7 @@ use crate::sync::UPSafeCell;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use alloc::vec;
 use core::arch::asm;
 use lazy_static::*;
 use riscv::register::satp;
@@ -300,6 +301,106 @@ impl MemorySet {
             false
         }
     }
+
+    /// Map a area, return error when conflicts
+    pub fn map(&mut self, start: VirtAddr, end: VirtAddr, permission: MapPermission) -> Result<(), ()> {
+        for area in &self.areas {
+            if !(end <= area.vpn_range.get_start().into()
+            || start >= area.vpn_range.get_end().into()) {
+                return Err(());
+            }
+        }
+
+        self.insert_framed_area(start, end, permission);
+
+        Ok(())
+    }
+
+    /// Unmap a area, return error when conflicts
+    pub fn unmap(&mut self, start: VirtAddr, end: VirtAddr) -> Result<(),()> {
+        let mut parts: Vec<(VirtPageNum,VirtPageNum)> = vec![(start.floor(), end.ceil())];
+        let mut remove_index: Vec<usize> = Vec::new();
+        let mut shrink_from_begin: Vec<(usize, VirtPageNum)> = Vec::new();
+        let mut shrink_from_end: Vec<(usize, VirtPageNum)> = Vec::new();
+        let mut shrink: Vec<(usize, VirtPageNum, VirtPageNum)> = Vec::new();
+
+        for (i, area) in self.areas.iter().enumerate() {
+            // area.data_frames.
+            for (j, part) in parts.clone().iter().enumerate() {
+                // if contains a range that was 
+                if part.0 == area.vpn_range.get_start() && part.1 == area.vpn_range.get_end() {
+                    remove_index.push(i);
+                    parts.remove(j);
+                    break;
+                }
+
+                if part.0 > area.vpn_range.get_start() && part.1 >= area.vpn_range.get_end() && part.0 < area.vpn_range.get_end() {
+                    shrink_from_end.push((i, part.0));
+                    parts.remove(j);
+                    if part.1 > area.vpn_range.get_end() {
+                        parts.push((area.vpn_range.get_end(),part.1));
+                    }
+                    break;
+                }
+
+                if part.0 <= area.vpn_range.get_start() && part.1 < area.vpn_range.get_end() && part.1 > area.vpn_range.get_start() {
+                    shrink_from_begin.push((i, part.1));
+                    parts.remove(j);
+                    if part.0 < area.vpn_range.get_start() {
+                        parts.push((part.0,area.vpn_range.get_start()));
+                    }
+                    break;
+                }
+
+                if part.0 > area.vpn_range.get_start() && part.0 < area.vpn_range.get_end() 
+                && part.1 > area.vpn_range.get_start() && part.1 < area.vpn_range.get_end() {
+                    shrink.push((i, part.0, part.1));
+                    parts.remove(j);
+                    break;
+                }
+            }
+        }
+
+        if !parts.is_empty() {
+            return Err(())
+        }
+
+        // shrink all map areas that required to shrink
+        for it in shrink_from_begin {
+            self.areas[it.0].shrink_from_begin(&mut self.page_table, it.1);
+        }
+
+        for it in shrink_from_end {
+            self.areas[it.0].shrink_to(&mut self.page_table, it.1);
+        }
+
+        for it in shrink {
+            self.areas[it.0].shrink_to_slice(&mut self.page_table, it.1, it.2);
+        }
+
+        // remove all map areas that required to remove
+        let mut i: usize = 0;
+        for index in remove_index.clone() {
+            self.areas[index].unmap(&mut self.page_table);
+        }
+        self.areas.retain(|_| {
+            i += 1;
+            !remove_index.contains(&(i - 1))
+        });
+
+        Ok(())
+    }
+
+    /// map one virtual page, may cause leaking in pte.
+    pub fn map_one(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, map_perm: MapPermission) {
+        let flags = PTEFlags::from_bits(map_perm.bits).unwrap();
+        self.page_table.map(vpn, ppn, flags);
+    }
+
+    /// map one virtual page, may cause leaking in pte.
+    pub fn unmap_one(&mut self, vpn: VirtPageNum) {
+        self.page_table.unmap(vpn);
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -372,6 +473,23 @@ impl MapArea {
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
     }
     #[allow(unused)]
+    pub fn shrink_from_begin(&mut self, page_table: &mut PageTable, new_start: VirtPageNum) {
+        for vpn in VPNRange::new(self.vpn_range.get_start(), new_start) {
+            self.unmap_one(page_table, vpn)
+        }
+        self.vpn_range = VPNRange::new(new_start, self.vpn_range.get_end());
+    }
+    #[allow(unused)]
+    pub fn shrink_to_slice(&mut self, page_table: &mut PageTable, new_start: VirtPageNum, new_end: VirtPageNum) {
+        for vpn in VPNRange::new(self.vpn_range.get_start(), new_start) {
+            self.unmap_one(page_table, vpn)
+        }
+        for vpn in VPNRange::new(new_end, self.vpn_range.get_end()) {
+            self.unmap_one(page_table, vpn)
+        }
+        self.vpn_range = VPNRange::new(new_start, new_end);
+    }
+    #[allow(unused)]
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(self.vpn_range.get_end(), new_end) {
             self.map_one(page_table, vpn)
@@ -399,6 +517,25 @@ impl MapArea {
             }
             current_vpn.step();
         }
+    }
+
+    /// Split the map area into two pieces.
+    /// current map area will be the shrinked,
+    /// returned map area will contain shrinked part.
+    #[allow(unused)]
+    pub fn split_at(&mut self, index: VirtPageNum) -> MapArea{
+        assert!(index < self.vpn_range.get_end(), "Given vpn range was longer than end.");
+        assert!(index > self.vpn_range.get_start(), "Given vpn range was shorter than start.");
+
+        let ret = MapArea{
+            vpn_range: VPNRange::new(index, self.vpn_range.get_end()),
+            data_frames: self.data_frames.split_off(&index),
+            map_type: self.map_type,
+            map_perm: self.map_perm,
+        };
+        
+        self.vpn_range = VPNRange::new(self.vpn_range.get_start(), index);
+        ret
     }
 }
 

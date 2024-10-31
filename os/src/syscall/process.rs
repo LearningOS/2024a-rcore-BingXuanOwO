@@ -6,15 +6,12 @@ use crate::{
     config::MAX_SYSCALL_NUM,
     fs::{open_file, OpenFlags},
     mm::{
-        translated_refmut, translated_str, map_area_from_token, 
-        map_user_ptr_to_kernel, unmap_area_from_token, MapPermission, VirtAddr 
+        map_area_from_token, map_user_ptr_to_kernel, translated_refmut, translated_str, unmap_area_from_token, unmap_user_ptr_to_kernel_from_kernel_addr, MapPermission, VirtAddr 
     },
     task::{
-        add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next, TaskStatus,
-        get_current_task_status, get_current_task_syscall_times, get_current_task_exec_time
+        add_task, current_task, current_user_token, exit_current_and_run_next, suspend_current_and_run_next, TaskStatus
     },
-    timer::get_time_ms,
+    timer::{get_time_ms, get_time_us},
 };
 
 #[repr(C)]
@@ -138,6 +135,9 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
         (*virt_ts).sec = time_us / 1_000_000;
         (*virt_ts).usec = time_us % 1_000_000;
     }
+    
+    unmap_user_ptr_to_kernel_from_kernel_addr(virt_ts);
+
     0
 }
 
@@ -146,9 +146,6 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
 /// HINT: What if [`TaskInfo`] is splitted by two pages ?
 pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
     trace!("kernel: sys_task_info");
-    let status = get_current_task_status();
-    let syscall_times = get_current_task_syscall_times();
-    let time = get_time_ms() - get_current_task_exec_time();
 
     let result = map_user_ptr_to_kernel(_ti);
 
@@ -157,13 +154,23 @@ pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
     }
 
     let virt_ti = result.unwrap();
+    if let Some(task) = current_task() {
+        let status = task.get_task_status();
+        let syscall_times = task.get_syscall_times();
+        let time = get_time_ms() - task.get_exec_time();
 
-    unsafe{
-        (*virt_ti).status = status;
-        (*virt_ti).syscall_times = syscall_times;
-        (*virt_ti).time = time;
+        unsafe{
+            (*virt_ti).status = status;
+            (*virt_ti).syscall_times = syscall_times;
+            (*virt_ti).time = time;
+        }
+
+        unmap_user_ptr_to_kernel_from_kernel_addr(virt_ti);
+
+        0
+    } else {
+        -1
     }
-    0
 }
 
 /// YOUR JOB: Implement mmap.
@@ -232,17 +239,38 @@ pub fn sys_sbrk(size: i32) -> isize {
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(_path: *const u8) -> isize {
     trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_spawn",
         current_task().unwrap().pid.0
     );
-    -1
+    let current_task = current_task().unwrap();
+    let token = current_user_token();
+    let path = translated_str(token, _path);
+
+    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        let data = app_inode.read_all();
+        let new_task = current_task.spawn_child(data.as_slice());
+        let new_pid = new_task.pid.0;
+        add_task(new_task);
+        new_pid as isize
+    } else {
+        -1
+    }
 }
 
 // YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
+pub fn sys_set_priority(prio: isize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_set_priority",
         current_task().unwrap().pid.0
     );
-    -1
+
+    if prio < 2 {
+        return -1
+    }
+
+    if let Some(task) = current_task() {
+        task.set_priority(prio);
+    }
+
+    prio
 }

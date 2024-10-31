@@ -1,15 +1,17 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{BIG_STRIDE, MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use core::cmp::{max, min, Ordering};
 
 /// Task control block structure
 ///
@@ -35,6 +37,45 @@ impl TaskControlBlock {
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
         inner.memory_set.token()
+    }
+}
+
+impl PartialOrd for TaskControlBlock {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TaskControlBlock {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.get_stride().partial_cmp(&other.get_stride()).unwrap()
+    }
+}
+
+impl PartialEq for TaskControlBlock {
+    fn eq(&self, other: &Self) -> bool {
+        self.get_stride() == other.get_stride()
+    }
+}
+
+impl Eq for TaskControlBlock { }
+
+#[derive(Clone, Copy)]
+pub struct Stride(pub u64);
+
+impl PartialOrd for Stride {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if max(self.0, other.0) - min(self.0, other.0) > BIG_STRIDE {
+            other.0.partial_cmp(&self.0)
+        } else {
+            self.0.partial_cmp(&other.0)
+        }
+    }
+}
+
+impl PartialEq for Stride {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
     }
 }
 
@@ -77,6 +118,12 @@ pub struct TaskControlBlockInner {
     
     /// The numbers of syscall called by task
     pub syscall_times: [u32; MAX_SYSCALL_NUM],
+
+    /// Stride count for current task
+    pub stride: Stride,
+
+    /// Process priority
+    pub priority: isize,
 }
 
 impl TaskControlBlockInner {
@@ -143,6 +190,8 @@ impl TaskControlBlock {
                     program_brk: user_sp,
                     exec_time: 0,
                     syscall_times: [0; MAX_SYSCALL_NUM],
+                    priority: 16,
+                    stride: Stride(0),
                 })
             },
         };
@@ -173,6 +222,15 @@ impl TaskControlBlock {
         inner.memory_set = memory_set;
         // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
+        // initialize base_size
+        inner.base_size = user_sp;
+        // count exec time and clear syscall time
+        inner.exec_time = get_time_ms();
+        inner.syscall_times = [0;MAX_SYSCALL_NUM];
+        // reset priority and stride
+        inner.priority = 16;
+        inner.stride = Stride(0);
+
         // initialize trap_cx
         let trap_cx = TrapContext::app_init_context(
             entry_point,
@@ -226,6 +284,8 @@ impl TaskControlBlock {
                     program_brk: parent_inner.program_brk,
                     exec_time: parent_inner.exec_time,
                     syscall_times: parent_inner.syscall_times,
+                    priority: parent_inner.priority,
+                    stride: parent_inner.stride,
                 })
             },
         });
@@ -239,6 +299,67 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// spawn a process as child
+    pub fn spawn_child(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let mut parent_inner = self.inner_exclusive_access();
+
+        let trap_cx_ppn = memory_set
+            .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
+            .unwrap()
+            .ppn();
+
+        let pid_handle = pid_alloc();
+        let kernel_stack = kstack_alloc();
+        let kernel_stack_top = kernel_stack.get_top();
+
+        // constuct task control block
+        let task_control_block = Arc::new(TaskControlBlock {
+            pid: pid_handle,
+            kernel_stack,
+            inner: unsafe {
+                UPSafeCell::new(TaskControlBlockInner {
+                    trap_cx_ppn,
+                    base_size: user_sp,
+                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                    task_status: TaskStatus::Ready,
+                    memory_set,
+                    parent: Some(Arc::downgrade(self)),
+                    children: Vec::new(),
+                    exit_code: 0,
+                    fd_table: vec![
+                        // 0 -> stdin
+                        Some(Arc::new(Stdin)),
+                        // 1 -> stdout
+                        Some(Arc::new(Stdout)),
+                        // 2 -> stderr
+                        Some(Arc::new(Stdout)),
+                    ],
+                    heap_bottom: user_sp,
+                    program_brk: user_sp,
+                    exec_time: 0,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    priority: 16,
+                    stride: Stride(0),
+                })
+            },
+        });
+
+        // init trap context
+        let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
+        *trap_cx = TrapContext::app_init_context(
+            entry_point,
+            user_sp,
+            KERNEL_SPACE.exclusive_access().token(),
+            kernel_stack_top,
+            trap_handler as usize,
+        );
+
+        parent_inner.children.push(task_control_block.clone());
+
+        task_control_block
     }
 
     /// get pid of process
@@ -270,6 +391,41 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// get status of current task
+    pub fn get_task_status(&self) -> TaskStatus {
+        self.inner_exclusive_access().task_status
+    }
+
+    /// get syscall times
+    pub fn get_syscall_times(&self) -> [u32; MAX_SYSCALL_NUM] {
+        self.inner_exclusive_access().syscall_times
+    }
+
+    /// adds count for given syscall id
+    pub fn add_syscall_time(&self, syscall_id: usize) {
+        self.inner_exclusive_access().syscall_times[syscall_id] += 1;
+    }
+
+    /// get time of when this process exec
+    pub fn get_exec_time(&self) -> usize {
+        self.inner_exclusive_access().exec_time
+    }
+
+    /// get a rawptr of current processs's memory set
+    pub fn get_memory_set(&self) -> *mut MemorySet {
+        &mut self.inner_exclusive_access().memory_set
+    }
+
+    /// get stride value
+    pub fn get_stride(&self) -> Stride {
+        self.inner_exclusive_access().stride
+    }
+
+    /// set priority
+    pub fn set_priority(&self, priority: isize) {
+        self.inner_exclusive_access().priority = priority
     }
 }
 

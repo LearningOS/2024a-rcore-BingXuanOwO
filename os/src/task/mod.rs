@@ -121,27 +121,9 @@ pub fn add_initproc() {
     add_task(INITPROC.clone());
 }
 
-/// Get status of current task
-pub fn get_current_task_status() -> TaskStatus {
-    TASK_MANAGER.get_current_task_status()
-}
-
-/// Get syscall times of current task
-pub fn get_current_task_syscall_times() -> [u32; MAX_SYSCALL_NUM] {
-    TASK_MANAGER.get_current_task_syscall_times()
-}
-
-/// Get exec time of current task
-pub fn get_current_task_exec_time() -> usize{
-    TASK_MANAGER.get_current_task_exec_time()
-}
-
-/// Add current time to total syscall times
+/// Add current time into current task's total syscall times
 pub fn add_syscall_time(syscall_id: usize) {
-    TASK_MANAGER.add_syscall_time(syscall_id);
-}
-
-/// Get a row pointer of current user's memory set 
-pub fn current_user_memory_set() -> *mut MemorySet {
-    TASK_MANAGER.current_user_memory_set()
+    if let Some(task) = current_task() {
+        task.add_syscall_time(syscall_id);
+    }
 }

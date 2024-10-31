@@ -27,8 +27,7 @@ pub use page_table::{
 
 use lazy_static::*;
 
-use crate::sync::UPSafeCell;
-use crate::task::current_user_memory_set;
+use crate::task::current_task;
 
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {
@@ -43,8 +42,12 @@ pub fn map_area_from_token(start: usize, len: usize, map_perm: MapPermission) ->
     // let start_vpn: VirtPageNum  = VirtAddr(start).floor();
     // let end_vpn: VirtPageNum = VirtAddr(start + len).ceil();
     // let pte_flags = PTEFlags::from_bits(map_perm.bits()).unwrap();
+    let task_opt = current_task();
+    if task_opt.is_none() {
+        return Err(());
+    }
 
-    let memory_set = current_user_memory_set();
+    let memory_set = task_opt.unwrap().get_memory_set();
 
     unsafe {
         (*memory_set).map(start.into(), (start+len).into(), map_perm)
@@ -58,7 +61,12 @@ pub fn unmap_area_from_token(start: usize, len: usize) -> Result<(), ()> {
     // let start_vpn: VirtPageNum  = VirtAddr(start).floor();
     // let end_vpn: VirtPageNum = VirtAddr(start + len).ceil();
 
-    let memory_set = current_user_memory_set();
+    let task_opt = current_task();
+    if task_opt.is_none() {
+        return Err(());
+    }
+
+    let memory_set = task_opt.unwrap().get_memory_set();
 
     // unsafe {
     //     memory_set.areas
@@ -72,26 +80,24 @@ pub fn unmap_area_from_token(start: usize, len: usize) -> Result<(), ()> {
     }
 }
 
-lazy_static! {
-    /// 
-    pub static ref CURRENT_NEW_TEMP_VPN: Arc<UPSafeCell<VirtPageNum>> =
-        Arc::new(unsafe {UPSafeCell::new(VirtPageNum(10000))});
-}
-
 /// map a pointer from current user space to kernel
 pub fn map_user_ptr_to_kernel<T>(ptr: *mut T) -> Result<*mut T, ()> {
+    let task_opt = current_task();
+    if task_opt.is_none() {
+        return Err(());
+    }
+
     let type_size = size_of::<T>();
     let user_addr = VirtAddr(ptr as usize);
 
     let offset: usize = user_addr.page_offset();
 
-    let mut new_temp_vpn = CURRENT_NEW_TEMP_VPN.exclusive_access();
-
-    let ret_addr_begin: VirtPageNum = *new_temp_vpn;
+    let ret_addr_begin: VirtPageNum = VirtPageNum(10000);
     let ret_addr_begin_addr: VirtAddr = ret_addr_begin.into();
     let addr_end = VirtAddr(ret_addr_begin_addr.0 + offset + type_size);
     let mut kernel_space = KERNEL_SPACE.exclusive_access();
-    let current_user_memory_set = current_user_memory_set();
+
+    let current_user_memory_set = task_opt.unwrap().get_memory_set();
 
     let mut kernel_vpn_iter = VPNRange::new(ret_addr_begin, addr_end.ceil()).into_iter();
 
@@ -107,12 +113,24 @@ pub fn map_user_ptr_to_kernel<T>(ptr: *mut T) -> Result<*mut T, ()> {
         } else {
             return Err(());
         }
-
-        (*new_temp_vpn).0 += 1;
     }
 
     drop(kernel_space);
-    drop(new_temp_vpn);
 
     Ok((ret_addr_begin_addr.0 + offset) as *mut T)
+}
+
+/// free temp ptr that used to map a user ptr to kernel
+pub fn unmap_user_ptr_to_kernel_from_kernel_addr<T>(ptr: *mut T) {
+    let type_size = size_of::<T>();
+    let addr = VirtAddr(ptr as usize);
+
+    let start = addr.floor();
+    let end = VirtAddr(ptr as usize + type_size).ceil();
+
+    let mut kernel_space = KERNEL_SPACE.exclusive_access();
+
+    for vpn in VPNRange::new(start, end) {
+        kernel_space.unmap_one(vpn);
+    }
 }

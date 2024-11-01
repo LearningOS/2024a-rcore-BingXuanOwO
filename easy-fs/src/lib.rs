@@ -16,3 +16,4 @@ pub use block_dev::BlockDevice;
 pub use efs::EasyFileSystem;
 use layout::*;
 pub use vfs::Inode;
+pub use vfs::get_inode_ref_count_by_id;

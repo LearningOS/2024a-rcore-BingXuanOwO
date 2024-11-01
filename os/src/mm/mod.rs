@@ -14,8 +14,8 @@ mod page_table;
 
 use core::mem::size_of;
 
+use address::VPNRange;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
-use alloc::sync::Arc;
 pub use frame_allocator::{frame_alloc, frame_dealloc, FrameTracker};
 pub use memory_set::remap_test;
 pub use memory_set::{kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
@@ -24,8 +24,6 @@ pub use page_table::{
     translated_byte_buffer, translated_ref, translated_refmut, translated_str, PageTable,
     PageTableEntry, UserBuffer, UserBufferIterator,
 };
-
-use lazy_static::*;
 
 use crate::task::current_task;
 
